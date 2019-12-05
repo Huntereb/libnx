@@ -7,6 +7,7 @@
 #include "services/usbds.h"
 #include "runtime/hosversion.h"
 #include "runtime/devices/usb_comms.h"
+#include <stdio.h>
 
 #define TOTAL_INTERFACES 4
 
@@ -408,10 +409,6 @@ static Result _usbCommsRead(usbCommsInterface *interface, void* buffer, size_t s
     size_t total_transferredSize=0;
     UsbDsReportData reportdata;
 
-    //Makes sure endpoints are ready for data-transfer / wait for init if needed.
-    rc = usbDsWaitReady(U64_MAX);
-    if (R_FAILED(rc)) return rc;
-
     while(size)
     {
         if(((u64)bufptr) & 0xfff)//When bufptr isn't page-aligned copy the data into g_usbComms_endpoint_in_buffer and transfer that, otherwise use the bufptr directly.
@@ -436,9 +433,18 @@ static Result _usbCommsRead(usbCommsInterface *interface, void* buffer, size_t s
         //Start a host->device transfer.
         rc = usbDsEndpoint_PostBufferAsync(interface->endpoint_out, transfer_buffer, chunksize, &urbId);
         if (R_FAILED(rc)) return rc;
-
         //Wait for the transfer to finish.
-        eventWait(&interface->endpoint_out->CompletionEvent, U64_MAX);
+        if (size < 0x1000) {
+            rc = eventWait(&interface->endpoint_out->CompletionEvent, 500000000);
+        }
+        else rc = eventWait(&interface->endpoint_out->CompletionEvent, U64_MAX);
+        if (R_FAILED(rc))
+        {
+            usbDsEndpoint_Cancel(interface->endpoint_out);
+            eventWait(&interface->endpoint_out->CompletionEvent, U64_MAX);
+            eventClear(&interface->endpoint_out->CompletionEvent);
+            return rc;
+        }
         eventClear(&interface->endpoint_out->CompletionEvent);
 
         rc = usbDsEndpoint_GetReportData(interface->endpoint_out, &reportdata);
@@ -473,10 +479,6 @@ static Result _usbCommsWrite(usbCommsInterface *interface, const void* buffer, s
     size_t total_transferredSize=0;
     UsbDsReportData reportdata;
 
-    //Makes sure endpoints are ready for data-transfer / wait for init if needed.
-    rc = usbDsWaitReady(U64_MAX);
-    if (R_FAILED(rc)) return rc;
-
     while(size)
     {
         if(((u64)bufptr) & 0xfff)//When bufptr isn't page-aligned copy the data into g_usbComms_endpoint_in_buffer and transfer that, otherwise use the bufptr directly.
@@ -501,7 +503,17 @@ static Result _usbCommsWrite(usbCommsInterface *interface, const void* buffer, s
         if(R_FAILED(rc))return rc;
 
         //Wait for the transfer to finish.
-        eventWait(&interface->endpoint_in->CompletionEvent, U64_MAX);
+        if (size < 0x1000) {
+            rc = eventWait(&interface->endpoint_in->CompletionEvent, 500000000);
+        }
+        else rc = eventWait(&interface->endpoint_in->CompletionEvent, U64_MAX);
+        if (R_FAILED(rc))
+        {
+            usbDsEndpoint_Cancel(interface->endpoint_in);
+            eventWait(&interface->endpoint_in->CompletionEvent, U64_MAX);
+            eventClear(&interface->endpoint_in->CompletionEvent);
+            return rc;
+        }
         eventClear(&interface->endpoint_in->CompletionEvent);
 
         rc = usbDsEndpoint_GetReportData(interface->endpoint_in, &reportdata);
@@ -528,8 +540,7 @@ static Result _usbCommsWrite(usbCommsInterface *interface, const void* buffer, s
 size_t usbCommsReadEx(void* buffer, size_t size, u32 interface)
 {
     size_t transferredSize=0;
-    u32 state=0;
-    Result rc, rc2;
+    Result rc;
     usbCommsInterface *inter = &g_usbCommsInterfaces[interface];
     bool initialized;
 
@@ -539,21 +550,15 @@ size_t usbCommsReadEx(void* buffer, size_t size, u32 interface)
     initialized = inter->initialized;
     rwlockReadUnlock(&inter->lock);
     if (!initialized) return 0;
-
-    rwlockWriteLock(&inter->lock_out);
-    rc = _usbCommsRead(inter, buffer, size, &transferredSize);
-    rwlockWriteUnlock(&inter->lock_out);
-    if (R_FAILED(rc)) {
-        rc2 = usbDsGetState(&state);
-        if (R_SUCCEEDED(rc2)) {
-            if (state!=5) {
-                rwlockWriteLock(&inter->lock_out);
-                rc = _usbCommsRead(&g_usbCommsInterfaces[interface], buffer, size, &transferredSize); //If state changed during transfer, try again. usbDsWaitReady() will be called from this.
-                rwlockWriteUnlock(&inter->lock_out);
-            }
-        }
-        if (R_FAILED(rc) && g_usbCommsErrorHandling) fatalThrow(MAKERESULT(Module_Libnx, LibnxError_BadUsbCommsRead));
+    int retries = 1;
+    while(retries++) {
+        rwlockWriteLock(&inter->lock_out);
+        rc = _usbCommsRead(inter, buffer, size, &transferredSize);
+        rwlockWriteUnlock(&inter->lock_out);
+        if (R_SUCCEEDED(rc)) break;
+        else if (retries == 25) return 0;
     }
+
     return transferredSize;
 }
 
@@ -565,8 +570,7 @@ size_t usbCommsRead(void* buffer, size_t size)
 size_t usbCommsWriteEx(const void* buffer, size_t size, u32 interface)
 {
     size_t transferredSize=0;
-    u32 state=0;
-    Result rc, rc2;
+    Result rc;
     usbCommsInterface *inter = &g_usbCommsInterfaces[interface];
     bool initialized;
 
@@ -576,21 +580,15 @@ size_t usbCommsWriteEx(const void* buffer, size_t size, u32 interface)
     initialized = inter->initialized;
     rwlockReadUnlock(&inter->lock);
     if (!initialized) return 0;
-
-    rwlockWriteLock(&inter->lock_in);
-    rc = _usbCommsWrite(&g_usbCommsInterfaces[interface], buffer, size, &transferredSize);
-    rwlockWriteUnlock(&inter->lock_in);
-    if (R_FAILED(rc)) {
-        rc2 = usbDsGetState(&state);
-        if (R_SUCCEEDED(rc2)) {
-            if (state!=5) {
-                rwlockWriteLock(&inter->lock_in);
-                rc = _usbCommsWrite(&g_usbCommsInterfaces[interface], buffer, size, &transferredSize); //If state changed during transfer, try again. usbDsWaitReady() will be called from this.
-                rwlockWriteUnlock(&inter->lock_in);
-            }
-        }
-        if (R_FAILED(rc) && g_usbCommsErrorHandling) fatalThrow(MAKERESULT(Module_Libnx, LibnxError_BadUsbCommsWrite));
+    int retries = 1;
+    while(retries++) {
+        rwlockWriteLock(&inter->lock_in);
+        rc = _usbCommsWrite(&g_usbCommsInterfaces[interface], buffer, size, &transferredSize);
+        rwlockWriteUnlock(&inter->lock_in);
+        if (R_SUCCEEDED(rc)) break;
+        else if (retries == 25) return 0;
     }
+
     return transferredSize;
 }
 
