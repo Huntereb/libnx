@@ -435,7 +435,7 @@ static Result _usbCommsRead(usbCommsInterface *interface, void* buffer, size_t s
         if (R_FAILED(rc)) return rc;
         //Wait for the transfer to finish.
         if (size < 0x1000) {
-            rc = eventWait(&interface->endpoint_out->CompletionEvent, 500000000);
+            rc = eventWait(&interface->endpoint_out->CompletionEvent, 150000000);
         }
         else rc = eventWait(&interface->endpoint_out->CompletionEvent, U64_MAX);
         if (R_FAILED(rc))
@@ -504,7 +504,7 @@ static Result _usbCommsWrite(usbCommsInterface *interface, const void* buffer, s
 
         //Wait for the transfer to finish.
         if (size < 0x1000) {
-            rc = eventWait(&interface->endpoint_in->CompletionEvent, 500000000);
+            rc = eventWait(&interface->endpoint_in->CompletionEvent, 1000000000);
         }
         else rc = eventWait(&interface->endpoint_in->CompletionEvent, U64_MAX);
         if (R_FAILED(rc))
@@ -550,16 +550,13 @@ size_t usbCommsReadEx(void* buffer, size_t size, u32 interface)
     initialized = inter->initialized;
     rwlockReadUnlock(&inter->lock);
     if (!initialized) return 0;
-    int retries = 1;
-    while(retries++) {
-        rwlockWriteLock(&inter->lock_out);
-        rc = _usbCommsRead(inter, buffer, size, &transferredSize);
-        rwlockWriteUnlock(&inter->lock_out);
-        if (R_SUCCEEDED(rc)) break;
-        else if (retries == 25) return 0;
-    }
-
-    return transferredSize;
+    
+    rwlockWriteLock(&inter->lock_in);
+    rc = _usbCommsRead(&g_usbCommsInterfaces[interface], buffer, size, &transferredSize);
+    rwlockWriteUnlock(&inter->lock_in);
+    if (R_SUCCEEDED(rc)) return transferredSize;
+    else if (R_FAILED(rc)) return 0;
+    return 0;
 }
 
 size_t usbCommsRead(void* buffer, size_t size)
@@ -580,16 +577,13 @@ size_t usbCommsWriteEx(const void* buffer, size_t size, u32 interface)
     initialized = inter->initialized;
     rwlockReadUnlock(&inter->lock);
     if (!initialized) return 0;
-    int retries = 1;
-    while(retries++) {
-        rwlockWriteLock(&inter->lock_in);
-        rc = _usbCommsWrite(&g_usbCommsInterfaces[interface], buffer, size, &transferredSize);
-        rwlockWriteUnlock(&inter->lock_in);
-        if (R_SUCCEEDED(rc)) break;
-        else if (retries == 25) return 0;
-    }
 
-    return transferredSize;
+    rwlockWriteLock(&inter->lock_in);
+    rc = _usbCommsWrite(&g_usbCommsInterfaces[interface], buffer, size, &transferredSize);
+    rwlockWriteUnlock(&inter->lock_in);
+    if (R_SUCCEEDED(rc)) return transferredSize;
+    else if (R_FAILED(rc)) return 0;
+    return 0;
 }
 
 size_t usbCommsWrite(const void* buffer, size_t size)
