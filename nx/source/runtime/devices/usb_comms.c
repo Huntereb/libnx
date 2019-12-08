@@ -409,6 +409,10 @@ static Result _usbCommsRead(usbCommsInterface *interface, void* buffer, size_t s
     size_t total_transferredSize=0;
     UsbDsReportData reportdata;
 
+    //Makes sure endpoints are ready for data-transfer / wait for init if needed.
+    rc = usbDsWaitReady(5000000000);
+    if (R_FAILED(rc)) return rc;
+
     while(size)
     {
         if(((u64)bufptr) & 0xfff)//When bufptr isn't page-aligned copy the data into g_usbComms_endpoint_in_buffer and transfer that, otherwise use the bufptr directly.
@@ -435,7 +439,7 @@ static Result _usbCommsRead(usbCommsInterface *interface, void* buffer, size_t s
         if (R_FAILED(rc)) return rc;
         //Wait for the transfer to finish.
         if (size < 0x1000) {
-            rc = eventWait(&interface->endpoint_out->CompletionEvent, 150000000);
+            rc = eventWait(&interface->endpoint_out->CompletionEvent, 1000000000);
         }
         else rc = eventWait(&interface->endpoint_out->CompletionEvent, U64_MAX);
         if (R_FAILED(rc))
@@ -478,6 +482,10 @@ static Result _usbCommsWrite(usbCommsInterface *interface, const void* buffer, s
     u32 tmp_transferredSize = 0;
     size_t total_transferredSize=0;
     UsbDsReportData reportdata;
+
+    //Makes sure endpoints are ready for data-transfer / wait for init if needed.
+    rc = usbDsWaitReady(5000000000);
+    if (R_FAILED(rc)) return rc;
 
     while(size)
     {
